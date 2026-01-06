@@ -131,7 +131,7 @@ const App: React.FC = () => {
               className="bg-red-900/30 hover:bg-red-900/50 p-3 rounded-lg transition-colors border border-red-800/50"
               title="Zerar Partida"
             >
-              <i className="fas fa-trash-can text-red-400"></i>
+              <i className="fas fa-xmark text-red-400"></i>
             </button>
           </div>
         </div>
