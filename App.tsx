@@ -65,17 +65,26 @@ const App: React.FC = () => {
 
   const addPoint = useCallback((playerNum: 1 | 2) => {
     if (status !== 'playing') return;
-    const setter = playerNum === 1 ? setPlayer1 : setPlayer2;
-    const opponentScore = playerNum === 1 ? player2.score : player1.score;
-
-    setter(prev => {
-      const newScore = prev.score + 1;
-      if (checkSetWinner(newScore, opponentScore)) {
-        setWinner(prev.name);
-        setStatus('finished');
-      }
-      return { ...prev, score: newScore };
-    });
+    
+    if (playerNum === 1) {
+      setPlayer1(prev => {
+        const newScore = prev.score + 1;
+        if (checkSetWinner(newScore, player2.score)) {
+          setWinner(prev.name);
+          setStatus('finished');
+        }
+        return { ...prev, score: newScore };
+      });
+    } else {
+      setPlayer2(prev => {
+        const newScore = prev.score + 1;
+        if (checkSetWinner(newScore, player1.score)) {
+          setWinner(prev.name);
+          setStatus('finished');
+        }
+        return { ...prev, score: newScore };
+      });
+    }
 
     if ('vibrate' in navigator) navigator.vibrate(50);
   }, [player1.score, player2.score, status]);
@@ -119,7 +128,7 @@ const App: React.FC = () => {
     setVoiceConnecting(true);
 
     try {
-      const apiKey = process.env.API_KEY;
+      const apiKey = (process.env as any).API_KEY;
       if (!apiKey) throw new Error("API Key missing");
 
       const ai = new GoogleGenAI({ apiKey });
@@ -150,7 +159,9 @@ const App: React.FC = () => {
             setVoiceConnecting(false);
           },
           onmessage: async (msg: LiveServerMessage) => {
-            const audio = msg.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
+            const parts = msg.serverContent?.modelTurn?.parts;
+            const audio = parts && parts.length > 0 ? parts[0].inlineData?.data : null;
+            
             if (audio && outputAudioContextRef.current) {
               const ctx = outputAudioContextRef.current;
               nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
@@ -162,7 +173,8 @@ const App: React.FC = () => {
               nextStartTimeRef.current += buffer.duration;
               sourcesRef.current.add(source);
             }
-            if (msg.toolCall) {
+            
+            if (msg.toolCall && msg.toolCall.functionCalls) {
               for (const fc of msg.toolCall.functionCalls) {
                 if (fc.name === 'scorePoint') {
                   const target = (fc.args as any).playerName?.toLowerCase() || "";
@@ -170,7 +182,7 @@ const App: React.FC = () => {
                   else if (target.includes(player2.name.toLowerCase())) addPointRef.current(2);
                 }
                 sessionPromise.then(s => s.sendToolResponse({
-                  functionResponses: { id: fc.id, name: fc.name, response: { result: "ok" } }
+                  functionResponses: [{ id: fc.id, name: fc.name, response: { result: "ok" } }]
                 }));
               }
             }
@@ -180,7 +192,7 @@ const App: React.FC = () => {
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: `Árbitro de ping pong para ${player1.name} e ${player2.name}. Use scorePoint para registrar pontos.`,
+          systemInstruction: `Você é o árbitro da partida entre ${player1.name} e ${player2.name}. Chame scorePoint para pontuar.`,
           tools: [{
             functionDeclarations: [{
               name: 'scorePoint',
@@ -222,10 +234,11 @@ const App: React.FC = () => {
               onClick={startVoiceAssistant}
               disabled={voiceConnecting}
               className={`p-3 rounded-lg border transition-all ${isVoiceActive ? 'bg-red-500 text-white animate-pulse' : 'bg-slate-800 text-slate-300'}`}
+              title="Assistente de Voz"
             >
               <i className={`fas ${voiceConnecting ? 'fa-spinner fa-spin' : 'fa-microphone'}`}></i>
             </button>
-            <button onClick={() => setStatus('setup')} className="bg-slate-800 p-3 rounded-lg border border-slate-700 text-slate-300">
+            <button onClick={() => setStatus('setup')} className="bg-slate-800 p-3 rounded-lg border border-slate-700 text-slate-300" title="Configurações">
               <i className="fas fa-cog"></i>
             </button>
           </div>
