@@ -1,5 +1,7 @@
 {
   "name": "Ping Pong Placar",
   "description": "A high-performance, offline-first table tennis scoring application with player registration, deuce logic, and set management.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [
+    "microphone"
+  ]
 }

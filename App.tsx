@@ -1,8 +1,48 @@
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { PlayerSetup } from './components/PlayerSetup';
 import { ScoreButton } from './components/ScoreButton';
 import { Player, GameStatus, MatchHistory } from './types';
+import { GoogleGenAI, Modality, Type, LiveServerMessage } from "@google/genai";
+
+// Funções auxiliares para codificação e decodificação de áudio PCM (Live API)
+function encode(bytes: Uint8Array) {
+  let binary = '';
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+function decode(base64: string) {
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
+
+async function decodeAudioData(
+  data: Uint8Array,
+  ctx: AudioContext,
+  sampleRate: number,
+  numChannels: number,
+): Promise<AudioBuffer> {
+  const dataInt16 = new Int16Array(data.buffer);
+  const frameCount = dataInt16.length / numChannels;
+  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+
+  for (let channel = 0; channel < numChannels; channel++) {
+    const channelData = buffer.getChannelData(channel);
+    for (let i = 0; i < frameCount; i++) {
+      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
+    }
+  }
+  return buffer;
+}
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<GameStatus>('setup');
@@ -11,15 +51,19 @@ const App: React.FC = () => {
   const [history, setHistory] = useState<MatchHistory>({ player1Sets: 0, player2Sets: 0, sets: [] });
   const [winner, setWinner] = useState<string | null>(null);
 
-  const startMatch = (p1Name: string, p2Name: string) => {
-    setPlayer1({ name: p1Name, score: 0, sets: 0 });
-    setPlayer2({ name: p2Name, score: 0, sets: 0 });
-    setHistory({ player1Sets: 0, player2Sets: 0, sets: [] });
-    setStatus('playing');
-  };
+  // Estados para Voz
+  const [isVoiceActive, setIsVoiceActive] = useState(false);
+  const [voiceConnecting, setVoiceConnecting] = useState(false);
+  const sessionRef = useRef<any>(null);
+  const inputAudioContextRef = useRef<AudioContext | null>(null);
+  const outputAudioContextRef = useRef<AudioContext | null>(null);
+  const nextStartTimeRef = useRef(0);
+  const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+
+  // Ref para garantir que a função addPoint use o estado atual dentro das callbacks do microfone
+  const addPointRef = useRef<(p: 1 | 2) => void>(() => {});
 
   const checkSetWinner = (s1: number, s2: number): boolean => {
-    // 11 points minimum, must have 2 points lead
     if (s1 >= 11 || s2 >= 11) {
       if (Math.abs(s1 - s2) >= 2) {
         return true;
@@ -51,11 +95,22 @@ const App: React.FC = () => {
       });
     }
 
-    // Try to trigger haptic feedback if available
     if ('vibrate' in navigator) {
       navigator.vibrate(50);
     }
   }, [player1.score, player2.score, status]);
+
+  // Sincroniza a ref da função com o estado atual
+  useEffect(() => {
+    addPointRef.current = addPoint;
+  }, [addPoint]);
+
+  const startMatch = (p1Name: string, p2Name: string) => {
+    setPlayer1({ name: p1Name, score: 0, sets: 0 });
+    setPlayer2({ name: p2Name, score: 0, sets: 0 });
+    setHistory({ player1Sets: 0, player2Sets: 0, sets: [] });
+    setStatus('playing');
+  };
 
   const resetSet = () => {
     setPlayer1(prev => ({ ...prev, score: 0 }));
@@ -81,6 +136,164 @@ const App: React.FC = () => {
     if (confirm('Tem certeza que deseja zerar a partida inteira?')) {
       setStatus('setup');
       setWinner(null);
+      if (isVoiceActive) stopVoiceAssistant();
+    }
+  };
+
+  const stopVoiceAssistant = () => {
+    if (sessionRef.current) {
+      sessionRef.current.close();
+      sessionRef.current = null;
+    }
+    if (inputAudioContextRef.current) {
+      inputAudioContextRef.current.close().catch(console.error);
+      inputAudioContextRef.current = null;
+    }
+    if (outputAudioContextRef.current) {
+      outputAudioContextRef.current.close().catch(console.error);
+      outputAudioContextRef.current = null;
+    }
+    for (const source of sourcesRef.current.values()) {
+      source.stop();
+    }
+    sourcesRef.current.clear();
+    setIsVoiceActive(false);
+    setVoiceConnecting(false);
+  };
+
+  const startVoiceAssistant = async () => {
+    if (isVoiceActive) {
+      stopVoiceAssistant();
+      return;
+    }
+
+    setVoiceConnecting(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+      const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      inputAudioContextRef.current = inputCtx;
+      outputAudioContextRef.current = outputCtx;
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const outputNode = outputCtx.createGain();
+      outputNode.connect(outputCtx.destination);
+
+      const scorePointFunction: any = {
+        name: 'scorePoint',
+        parameters: {
+          type: Type.OBJECT,
+          description: 'Registra um ponto para um dos jogadores de ping pong.',
+          properties: {
+            playerName: {
+              type: Type.STRING,
+              description: 'O nome do jogador que marcou o ponto.',
+            }
+          },
+          required: ['playerName'],
+        },
+      };
+
+      const sessionPromise = ai.live.connect({
+        model: 'gemini-2.5-flash-native-audio-preview-12-2025',
+        callbacks: {
+          onopen: () => {
+            const source = inputCtx.createMediaStreamSource(stream);
+            const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
+            scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
+              const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
+              const l = inputData.length;
+              const int16 = new Int16Array(l);
+              for (let i = 0; i < l; i++) {
+                int16[i] = inputData[i] * 32768;
+              }
+              const pcmBlob = {
+                data: encode(new Uint8Array(int16.buffer)),
+                mimeType: 'audio/pcm;rate=16000',
+              };
+              sessionPromise.then((session) => {
+                session.sendRealtimeInput({ media: pcmBlob });
+              });
+            };
+            source.connect(scriptProcessor);
+            scriptProcessor.connect(inputCtx.destination);
+            setIsVoiceActive(true);
+            setVoiceConnecting(false);
+          },
+          onmessage: async (message: LiveServerMessage) => {
+            const base64EncodedAudioString = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
+            if (base64EncodedAudioString && outputAudioContextRef.current) {
+              const ctx = outputAudioContextRef.current;
+              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
+              const audioBuffer = await decodeAudioData(decode(base64EncodedAudioString), ctx, 24000, 1);
+              const source = ctx.createBufferSource();
+              source.buffer = audioBuffer;
+              source.connect(outputNode);
+              source.addEventListener('ended', () => {
+                sourcesRef.current.delete(source);
+              });
+              source.start(nextStartTimeRef.current);
+              nextStartTimeRef.current = nextStartTimeRef.current + audioBuffer.duration;
+              sourcesRef.current.add(source);
+            }
+
+            if (message.toolCall) {
+              for (const fc of message.toolCall.functionCalls) {
+                if (fc.name === 'scorePoint') {
+                  const targetName = (fc.args as any).playerName?.toLowerCase() || "";
+                  if (targetName.includes(player1.name.toLowerCase())) {
+                    addPointRef.current(1);
+                  } else if (targetName.includes(player2.name.toLowerCase())) {
+                    addPointRef.current(2);
+                  }
+                  
+                  sessionPromise.then((session) => {
+                    session.sendToolResponse({
+                      functionResponses: {
+                        id: fc.id,
+                        name: fc.name,
+                        response: { result: "ok" },
+                      }
+                    });
+                  });
+                }
+              }
+            }
+
+            const interrupted = message.serverContent?.interrupted;
+            if (interrupted) {
+              for (const source of sourcesRef.current.values()) {
+                source.stop();
+              }
+              sourcesRef.current.clear();
+              nextStartTimeRef.current = 0;
+            }
+          },
+          onerror: (e: any) => {
+            console.error('Live API Error:', e);
+            stopVoiceAssistant();
+          },
+          onclose: () => {
+            stopVoiceAssistant();
+          },
+        },
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
+          },
+          systemInstruction: `Você é um árbitro assistente de uma partida de ping pong entre ${player1.name} e ${player2.name}. 
+          Ouça as pessoas falando e quando alguém disser que alguém marcou ponto, chame a função scorePoint com o nome do jogador. 
+          Exemplo: "Ponto para ${player1.name}" ou "${player2.name} marcou". 
+          Seja breve e confirme o ponto por áudio de forma curta e natural.`,
+          tools: [{ functionDeclarations: [scorePointFunction] }],
+        },
+      });
+
+      sessionRef.current = await sessionPromise;
+    } catch (error) {
+      console.error('Erro ao iniciar assistente de voz:', error);
+      setVoiceConnecting(false);
     }
   };
 
@@ -119,6 +332,18 @@ const App: React.FC = () => {
           <div className="h-8 w-[1px] bg-slate-700"></div>
 
           <div className="flex gap-2">
+            <button 
+              onClick={startVoiceAssistant}
+              className={`p-3 rounded-lg transition-all border ${
+                isVoiceActive 
+                  ? 'bg-red-500 text-white border-red-400 animate-pulse' 
+                  : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-300'
+              }`}
+              title={isVoiceActive ? "Desativar Microfone" : "Ativar Comando de Voz"}
+              disabled={voiceConnecting}
+            >
+              <i className={`fas ${voiceConnecting ? 'fa-spinner fa-spin' : (isVoiceActive ? 'fa-microphone' : 'fa-microphone-slash')}`}></i>
+            </button>
             <button 
               onClick={resetSet}
               className="bg-slate-800 hover:bg-slate-700 p-3 rounded-lg transition-colors border border-slate-700"
