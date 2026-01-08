@@ -100,15 +100,29 @@ const App: React.FC = () => {
     setStatus('playing');
   };
 
+  const resetSet = () => {
+    setPlayer1(p => ({ ...p, score: 0 }));
+    setPlayer2(p => ({ ...p, score: 0 }));
+    setWinner(null);
+    setStatus('playing');
+  };
+
+  const resetMatch = () => {
+    if (window.confirm('Deseja realmente resetar a partida e voltar ao início?')) {
+      stopVoiceAssistant();
+      setStatus('setup');
+      setPlayer1({ name: '', score: 0, sets: 0 });
+      setPlayer2({ name: '', score: 0, sets: 0 });
+      setWinner(null);
+    }
+  };
+
   const confirmSet = () => {
     if (winner === player1.name) setPlayer1(p => ({ ...p, sets: p.sets + 1 }));
     else setPlayer2(p => ({ ...p, sets: p.sets + 1 }));
     
     setHistory(h => ({ ...h, sets: [...h.sets, { p1: player1.score, p2: player2.score }] }));
-    setPlayer1(p => ({ ...p, score: 0 }));
-    setPlayer2(p => ({ ...p, score: 0 }));
-    setWinner(null);
-    setStatus('playing');
+    resetSet();
   };
 
   const stopVoiceAssistant = () => {
@@ -128,7 +142,7 @@ const App: React.FC = () => {
     setVoiceConnecting(true);
 
     try {
-      const apiKey = (process.env as any).API_KEY;
+      const apiKey = process.env.API_KEY;
       if (!apiKey) throw new Error("API Key missing");
 
       const ai = new GoogleGenAI({ apiKey });
@@ -182,7 +196,7 @@ const App: React.FC = () => {
                   else if (target.includes(player2.name.toLowerCase())) addPointRef.current(2);
                 }
                 sessionPromise.then(s => s.sendToolResponse({
-                  functionResponses: [{ id: fc.id, name: fc.name, response: { result: "ok" } }]
+                  functionResponses: { id: fc.id, name: fc.name, response: { result: "ok" } }
                 }));
               }
             }
@@ -192,7 +206,7 @@ const App: React.FC = () => {
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: `Você é o árbitro da partida entre ${player1.name} e ${player2.name}. Chame scorePoint para pontuar.`,
+          systemInstruction: `Você é o árbitro da partida entre ${player1.name} e ${player2.name}. Quando ouvir que alguém marcou ponto, chame scorePoint com o nome exato do jogador. Confirme o ponto com uma fala bem curta.`,
           tools: [{
             functionDeclarations: [{
               name: 'scorePoint',
@@ -205,6 +219,7 @@ const App: React.FC = () => {
     } catch (e) {
       console.error(e);
       setVoiceConnecting(false);
+      alert('Não foi possível acessar o microfone.');
     }
   };
 
@@ -217,6 +232,7 @@ const App: React.FC = () => {
           <i className="fas fa-table-tennis-paddle-ball text-xl text-blue-500"></i>
           <span className="text-xs font-black tracking-widest text-slate-400 uppercase">Pro Score</span>
         </div>
+        
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-4 bg-slate-800/50 px-4 py-2 rounded-xl border border-slate-700/50">
             <div className="flex items-center gap-2">
@@ -229,33 +245,68 @@ const App: React.FC = () => {
               <span className="text-sm font-bold text-slate-300">{player2.name}</span>
             </div>
           </div>
+
           <div className="flex gap-2">
             <button 
               onClick={startVoiceAssistant}
               disabled={voiceConnecting}
-              className={`p-3 rounded-lg border transition-all ${isVoiceActive ? 'bg-red-500 text-white animate-pulse' : 'bg-slate-800 text-slate-300'}`}
-              title="Assistente de Voz"
+              className={`p-3 w-12 rounded-lg border transition-all flex items-center justify-center ${
+                isVoiceActive ? 'bg-red-500 text-white animate-pulse border-red-400' : 'bg-slate-800 text-slate-300 border-slate-700'
+              }`}
+              title={isVoiceActive ? "Desativar Voz" : "Ativar Voz"}
             >
               <i className={`fas ${voiceConnecting ? 'fa-spinner fa-spin' : 'fa-microphone'}`}></i>
             </button>
-            <button onClick={() => setStatus('setup')} className="bg-slate-800 p-3 rounded-lg border border-slate-700 text-slate-300" title="Configurações">
-              <i className="fas fa-cog"></i>
+            
+            <button 
+              onClick={resetSet} 
+              className="bg-slate-800 p-3 w-12 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-700 transition-colors"
+              title="Zerar Set"
+            >
+              <i className="fas fa-rotate-left"></i>
+            </button>
+
+            <button 
+              onClick={resetMatch} 
+              className="bg-red-900/20 p-3 w-12 rounded-lg border border-red-900/50 text-red-400 hover:bg-red-900/40 transition-colors"
+              title="Resetar Partida"
+            >
+              <i className="fas fa-trash-can"></i>
             </button>
           </div>
         </div>
       </div>
+
       <div className="flex-1 flex p-4 gap-4">
         <ScoreButton playerName={player1.name} score={player1.score} color="blue" onClick={() => addPoint(1)} disabled={status === 'finished'} />
         <ScoreButton playerName={player2.name} score={player2.score} color="red" onClick={() => addPoint(2)} disabled={status === 'finished'} />
       </div>
+
       {status === 'finished' && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md">
-          <div className="bg-slate-800 p-10 rounded-3xl text-center max-w-sm w-full mx-4 border border-slate-700 shadow-2xl">
-            <h2 className="text-4xl font-black text-white mb-2">{winner} Venceu!</h2>
-            <button onClick={confirmSet} className="w-full bg-green-600 hover:bg-green-500 text-white font-black py-5 rounded-2xl text-2xl mt-4">PRÓXIMO SET</button>
+          <div className="bg-slate-800 p-10 rounded-3xl text-center max-w-sm w-full mx-4 border border-slate-700 shadow-2xl scale-up-center">
+            <div className="text-yellow-500 mb-4">
+              <i className="fas fa-trophy text-6xl"></i>
+            </div>
+            <h2 className="text-4xl font-black text-white mb-2">{winner} Venceu o Set!</h2>
+            <p className="text-slate-400 mb-8">Placar final: {player1.score} - {player2.score}</p>
+            <button onClick={confirmSet} className="w-full bg-green-600 hover:bg-green-500 text-white font-black py-5 rounded-2xl text-2xl shadow-lg shadow-green-900/20 transition-transform active:scale-95">
+              PRÓXIMO SET
+            </button>
           </div>
         </div>
       )}
+
+      <div className="h-8 bg-slate-900/50 border-t border-slate-800 flex items-center justify-center gap-4">
+          <div className="flex items-center gap-2">
+            <div className={`w-2 h-2 rounded-full ${((player1.score + player2.score) % 4 < 2) ? 'bg-blue-500' : 'bg-slate-800'}`}></div>
+            <span className="text-[10px] text-slate-500 uppercase font-bold">Saque</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-slate-500 uppercase font-bold">Saque</span>
+            <div className={`w-2 h-2 rounded-full ${((player1.score + player2.score) % 4 >= 2) ? 'bg-red-500' : 'bg-slate-800'}`}></div>
+          </div>
+      </div>
     </div>
   );
 };
