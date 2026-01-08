@@ -1,5 +1,5 @@
 
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import { PlayerSetup } from './components/PlayerSetup';
 import { ScoreButton } from './components/ScoreButton';
 import { Player, GameStatus, MatchHistory } from './types';
@@ -58,12 +58,8 @@ const App: React.FC = () => {
   const nextStartTimeRef = useRef(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
 
-  const startMatch = (p1Name: string, p2Name: string) => {
-    setPlayer1({ name: p1Name, score: 0, sets: 0 });
-    setPlayer2({ name: p2Name, score: 0, sets: 0 });
-    setHistory({ player1Sets: 0, player2Sets: 0, sets: [] });
-    setStatus('playing');
-  };
+  // Refs para as funções de pontuação serem acessadas pelos callbacks da Live API sem stale closures
+  const addPointRef = useRef<(p: 1 | 2) => void>(() => {});
 
   const checkSetWinner = (s1: number, s2: number): boolean => {
     if (s1 >= 11 || s2 >= 11) {
@@ -95,14 +91,24 @@ const App: React.FC = () => {
       });
     }
     if ('vibrate' in navigator) navigator.vibrate(50);
-  }, [player1.score, player2.score, status]);
+  }, [player1.name, player2.name, player1.score, player2.score, status]);
 
-  const resetSet = () => {
+  // Atualiza a ref toda vez que addPoint ou resetSet mudar
+  addPointRef.current = addPoint;
+
+  const startMatch = (p1Name: string, p2Name: string) => {
+    setPlayer1({ name: p1Name, score: 0, sets: 0 });
+    setPlayer2({ name: p2Name, score: 0, sets: 0 });
+    setHistory({ player1Sets: 0, player2Sets: 0, sets: [] });
+    setStatus('playing');
+  };
+
+  const resetSet = useCallback(() => {
     setPlayer1(prev => ({ ...prev, score: 0 }));
     setPlayer2(prev => ({ ...prev, score: 0 }));
     setWinner(null);
     setStatus('playing');
-  };
+  }, []);
 
   const confirmSet = () => {
     if (winner === player1.name) {
@@ -121,20 +127,20 @@ const App: React.FC = () => {
     if (confirm('Tem certeza que deseja zerar a partida inteira?')) {
       setStatus('setup');
       setWinner(null);
+      setPlayer1({ name: '', score: 0, sets: 0 });
+      setPlayer2({ name: '', score: 0, sets: 0 });
     }
   };
 
-  // Lógica da Live API Gemini
   const stopVoiceAssistant = () => {
     if (sessionRef.current) {
       sessionRef.current.close();
       sessionRef.current = null;
     }
     if (audioContextsRef.current) {
-      audioContextsRef.current.input.close();
-      audioContextsRef.current.output.close();
-      audioContextsRef.current.input = null as any;
-      audioContextsRef.current.output = null as any;
+      audioContextsRef.current.input.close().catch(() => {});
+      audioContextsRef.current.output.close().catch(() => {});
+      audioContextsRef.current = null;
     }
     setIsVoiceActive(false);
   };
@@ -147,7 +153,10 @@ const App: React.FC = () => {
 
     setVoiceConnecting(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const apiKey = process.env.API_KEY;
+      if (!apiKey) throw new Error("API Key não encontrada");
+
+      const ai = new GoogleGenAI({ apiKey });
       
       const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
@@ -198,32 +207,30 @@ const App: React.FC = () => {
             setIsVoiceActive(true);
           },
           onmessage: async (message: LiveServerMessage) => {
-            // Processar áudio do Gemini (Feedback vocal)
-            const audioData = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
-            if (audioData) {
-              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, outputCtx.currentTime);
-              const buffer = await decodeAudioData(decode(audioData), outputCtx, 24000, 1);
-              const source = outputCtx.createBufferSource();
+            const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+            if (audioData && audioContextsRef.current) {
+              const ctx = audioContextsRef.current.output;
+              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
+              const buffer = await decodeAudioData(decode(audioData), ctx, 24000, 1);
+              const source = ctx.createBufferSource();
               source.buffer = buffer;
-              source.connect(outputCtx.destination);
+              source.connect(ctx.destination);
               source.start(nextStartTimeRef.current);
               nextStartTimeRef.current += buffer.duration;
               sourcesRef.current.add(source);
             }
 
-            // Processar Function Calling (Comandos de Pontuação)
             if (message.toolCall) {
               for (const fc of message.toolCall.functionCalls) {
-                let response = "ok";
                 if (fc.name === 'scorePoint') {
                   const target = fc.args.playerName.toLowerCase();
-                  if (target.includes(player1.name.toLowerCase())) addPoint(1);
-                  else if (target.includes(player2.name.toLowerCase())) addPoint(2);
+                  if (target.includes(player1.name.toLowerCase())) addPointRef.current(1);
+                  else if (target.includes(player2.name.toLowerCase())) addPointRef.current(2);
                 } else if (fc.name === 'resetSet') {
                   resetSet();
                 }
                 sessionPromise.then(s => s.sendToolResponse({
-                  functionResponses: { id: fc.id, name: fc.name, response: { result: response } }
+                  functionResponses: { id: fc.id, name: fc.name, response: { result: "ok" } }
                 }));
               }
             }
@@ -234,18 +241,13 @@ const App: React.FC = () => {
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
-          systemInstruction: `Você é um árbitro de tênis de mesa em tempo real. 
-          Os jogadores são ${player1.name} e ${player2.name}. 
-          Ouça frases como "ponto para [nome]", "marquei", "ponto meu" ou similares. 
-          Use a função scorePoint quando alguém pontuar. 
-          Use resetSet se pedirem para zerar o set. 
-          Responda com áudio de forma BREVE e profissional, como um juiz. Ex: "Ponto para ${player1.name}" ou "Placar zerado".`,
+          systemInstruction: `Você é um árbitro de tênis de mesa. Jogadores: ${player1.name} e ${player2.name}. Ouça comandos de pontos e use scorePoint. Seja breve.`,
           tools: [{ functionDeclarations: [scorePointDeclaration, resetSetDeclaration] }],
         },
       });
       sessionRef.current = await sessionPromise;
     } catch (err) {
-      console.error(err);
+      console.error("Erro ao iniciar voz:", err);
       setVoiceConnecting(false);
     }
   };
@@ -256,7 +258,7 @@ const App: React.FC = () => {
 
   return (
     <div className="fixed inset-0 flex flex-col bg-slate-950 overflow-hidden">
-      {/* Header Info */}
+      {/* Header */}
       <div className="h-20 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-6 z-10 shadow-lg">
         <div className="flex items-center gap-2 opacity-60">
           <i className="fas fa-table-tennis-paddle-ball text-xl text-blue-500"></i>
@@ -279,7 +281,6 @@ const App: React.FC = () => {
           <div className="h-8 w-[1px] bg-slate-700"></div>
 
           <div className="flex gap-2">
-            {/* Botão de Voz */}
             <button 
               onClick={startVoiceAssistant}
               disabled={voiceConnecting}
@@ -288,28 +289,20 @@ const App: React.FC = () => {
                   ? 'bg-red-500/20 border-red-500 text-red-500 animate-pulse-red' 
                   : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
               }`}
-              title="Assistente de Voz"
             >
               <i className={`fas ${voiceConnecting ? 'fa-circle-notch fa-spin' : 'fa-microphone'}`}></i>
             </button>
-            <button 
-              onClick={resetSet}
-              className="bg-slate-800 hover:bg-slate-700 p-3 rounded-lg transition-colors border border-slate-700"
-              title="Zerar Set"
-            >
+            <button onClick={resetSet} className="bg-slate-800 hover:bg-slate-700 p-3 rounded-lg border border-slate-700">
               <i className="fas fa-rotate-left text-slate-300"></i>
             </button>
-            <button 
-              onClick={resetMatch}
-              className="bg-red-900/30 hover:bg-red-900/50 p-3 rounded-lg transition-colors border border-red-800/50"
-              title="Zerar Partida"
-            >
+            <button onClick={resetMatch} className="bg-red-900/30 hover:bg-red-900/50 p-3 rounded-lg border border-red-800/50">
               <i className="fas fa-xmark text-red-400"></i>
             </button>
           </div>
         </div>
       </div>
 
+      {/* Main Score Area */}
       <div className="flex-1 flex p-4 gap-4 bg-slate-950">
         <ScoreButton 
           playerName={player1.name} 
@@ -327,15 +320,14 @@ const App: React.FC = () => {
         />
       </div>
 
+      {/* Winner Overlay */}
       {status === 'finished' && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md">
           <div className="bg-slate-800 p-10 rounded-3xl border border-slate-700 shadow-2xl text-center max-w-sm w-full mx-4 animate-in zoom-in duration-300">
             <div className="mb-6 inline-flex p-5 rounded-full bg-yellow-500/20 text-yellow-500">
               <i className="fas fa-trophy text-6xl"></i>
             </div>
-            <h2 className="text-4xl font-black text-white mb-2 uppercase tracking-tight">
-              {winner} Venceu!
-            </h2>
+            <h2 className="text-4xl font-black text-white mb-2 uppercase tracking-tight">{winner} Venceu!</h2>
             <p className="text-slate-400 mb-8 text-lg">Placar: {player1.score} - {player2.score}</p>
             <button
               onClick={confirmSet}
@@ -347,6 +339,7 @@ const App: React.FC = () => {
         </div>
       )}
 
+      {/* Footer / Server Indicator */}
       <div className="h-12 bg-slate-900/50 flex items-center justify-center gap-8 px-4 border-t border-slate-800">
          <div className="flex items-center gap-2">
             <div className={`w-3 h-3 rounded-full ${((player1.score + player2.score) % 4 < 2) ? 'bg-blue-500 animate-pulse' : 'bg-slate-800'}`}></div>
