@@ -126,12 +126,19 @@ const App: React.FC = () => {
   };
 
   const stopVoiceAssistant = () => {
-    if (sessionRef.current) sessionRef.current.close();
+    if (sessionRef.current) {
+      sessionRef.current.close();
+      sessionRef.current = null;
+    }
     [inputAudioContextRef, outputAudioContextRef].forEach(ref => {
-      if (ref.current) ref.current.close().catch(() => {});
-      ref.current = null;
+      if (ref.current) {
+        ref.current.close().catch(() => {});
+        ref.current = null;
+      }
     });
-    sourcesRef.current.forEach(s => s.stop());
+    sourcesRef.current.forEach(s => {
+      try { s.stop(); } catch(e) {}
+    });
     sourcesRef.current.clear();
     setIsVoiceActive(false);
     setVoiceConnecting(false);
@@ -145,13 +152,19 @@ const App: React.FC = () => {
       const apiKey = process.env.API_KEY;
       if (!apiKey) throw new Error("API Key missing");
 
-      const ai = new GoogleGenAI({ apiKey });
-      const inputCtx = new AudioContext({ sampleRate: 16000 });
-      const outputCtx = new AudioContext({ sampleRate: 24000 });
+      // No iOS, o AudioContext deve ser criado ou resumido dentro do evento de clique
+      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+      const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      
+      // Essencial para Safari/iOS: retomar o contexto
+      await inputCtx.resume();
+      await outputCtx.resume();
+
       inputAudioContextRef.current = inputCtx;
       outputAudioContextRef.current = outputCtx;
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const ai = new GoogleGenAI({ apiKey });
 
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
@@ -178,6 +191,9 @@ const App: React.FC = () => {
             
             if (audio && outputAudioContextRef.current) {
               const ctx = outputAudioContextRef.current;
+              // Garante que o contexto de saída está ativo antes de tocar
+              if (ctx.state === 'suspended') await ctx.resume();
+              
               nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
               const buffer = await decodeAudioData(decode(audio), ctx, 24000, 1);
               const source = ctx.createBufferSource();
@@ -186,6 +202,7 @@ const App: React.FC = () => {
               source.start(nextStartTimeRef.current);
               nextStartTimeRef.current += buffer.duration;
               sourcesRef.current.add(source);
+              source.onended = () => sourcesRef.current.delete(source);
             }
             
             if (msg.toolCall && msg.toolCall.functionCalls) {
@@ -201,12 +218,15 @@ const App: React.FC = () => {
               }
             }
           },
-          onerror: stopVoiceAssistant,
-          onclose: stopVoiceAssistant,
+          onerror: (e) => {
+            console.error('Live API Error:', e);
+            stopVoiceAssistant();
+          },
+          onclose: () => stopVoiceAssistant(),
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: `Você é o árbitro da partida entre ${player1.name} e ${player2.name}. Quando ouvir que alguém marcou ponto, chame scorePoint com o nome exato do jogador. Confirme o ponto com uma fala bem curta.`,
+          systemInstruction: `Você é o árbitro de uma partida de ping pong entre ${player1.name} e ${player2.name}. Chame a função scorePoint quando ouvir que um jogador marcou ponto. Confirme o ponto de forma curta e enérgica.`,
           tools: [{
             functionDeclarations: [{
               name: 'scorePoint',
@@ -216,10 +236,13 @@ const App: React.FC = () => {
         }
       });
       sessionRef.current = await sessionPromise;
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      console.error('Microphone/Voice error:', e);
       setVoiceConnecting(false);
-      alert('Não foi possível acessar o microfone.');
+      let errorMsg = 'Não foi possível acessar o microfone.';
+      if (e.name === 'NotAllowedError') errorMsg = 'Permissão do microfone negada. Verifique as configurações do iOS.';
+      if (e.name === 'NotFoundError') errorMsg = 'Nenhum microfone encontrado.';
+      alert(errorMsg);
     }
   };
 
