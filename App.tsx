@@ -143,16 +143,24 @@ const App: React.FC = () => {
 
   const startVoiceAssistant = async () => {
     if (isVoiceActive) return stopVoiceAssistant();
+    
+    // CRÍTICO PARA IOS: getUserMedia DEVE ser a primeira linha após o clique.
+    // Não coloque setStates ou await de outras coisas antes disso.
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e: any) {
+      console.error('Microphone access denied:', e);
+      alert('Não foi possível acessar o microfone. No iPhone, verifique se não há outros apps usando o áudio e se o Safari tem permissão em Ajustes > Safari > Microfone.');
+      return;
+    }
+
     setVoiceConnecting(true);
 
     try {
-      // 1. PRIMEIRA CHAMADA SÍNCRONA: OBRIGATÓRIO PARA SAFARI iOS
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
       const apiKey = process.env.API_KEY;
       if (!apiKey) throw new Error("API Key missing");
 
-      // 2. UNIFICAÇÃO DO CONTEXTO: Usar apenas um contexto para entrada e saída no iOS
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       const ctx = new AudioContextClass({ sampleRate: 24000 });
       await ctx.resume();
@@ -165,7 +173,6 @@ const App: React.FC = () => {
         callbacks: {
           onopen: () => {
             const source = ctx.createMediaStreamSource(stream);
-            // ScriptProcessor para compatibilidade máxima com Safari
             const scriptProcessor = ctx.createScriptProcessor(4096, 1, 1);
             scriptProcessor.onaudioprocess = (e) => {
               const inputData = e.inputBuffer.getChannelData(0);
@@ -182,11 +189,9 @@ const App: React.FC = () => {
           },
           onmessage: async (msg: LiveServerMessage) => {
             const audioData = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-            
             if (audioData && audioContextRef.current) {
               const c = audioContextRef.current;
               if (c.state === 'suspended') await c.resume();
-              
               nextStartTimeRef.current = Math.max(nextStartTimeRef.current, c.currentTime);
               const buffer = await decodeAudioData(decode(audioData), c, 24000, 1);
               const source = c.createBufferSource();
@@ -197,7 +202,6 @@ const App: React.FC = () => {
               sourcesRef.current.add(source);
               source.onended = () => sourcesRef.current.delete(source);
             }
-            
             if (msg.toolCall?.functionCalls) {
               for (const fc of msg.toolCall.functionCalls) {
                 if (fc.name === 'scorePoint') {
@@ -219,7 +223,7 @@ const App: React.FC = () => {
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: `Árbitro de Ping Pong. Jogadores: ${player1.name} e ${player2.name}. Use scorePoint para marcar pontos.`,
+          systemInstruction: `Árbitro de Ping Pong. Jogadores: ${player1.name} e ${player2.name}. Marque ponto com scorePoint.`,
           tools: [{
             functionDeclarations: [{
               name: 'scorePoint',
@@ -230,9 +234,9 @@ const App: React.FC = () => {
       });
       sessionRef.current = await sessionPromise;
     } catch (e: any) {
-      console.error('Critical iOS Error:', e);
+      console.error('Session error:', e);
       setVoiceConnecting(false);
-      alert('Erro de acesso: Certifique-se que o Safari tem permissão de Microfone e você não está em outra chamada/vídeo.');
+      stopVoiceAssistant();
     }
   };
 
