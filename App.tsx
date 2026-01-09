@@ -144,12 +144,19 @@ const App: React.FC = () => {
   const startVoiceAssistant = async () => {
     if (isVoiceActive) return stopVoiceAssistant();
     
-    // 1. SOLICITAÇÃO IMEDIATA (SAFARI REQUIREMENT)
+    // 1. SOLICITAÇÃO IMEDIATA DO MICROFONE (NECESSÁRIO PARA SAFARI)
     let stream: MediaStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Pedindo áudio sem restrições complexas para compatibilidade total
+      stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        } 
+      });
     } catch (e) {
-      alert('Erro ao acessar microfone no iOS. Verifique as permissões do Safari.');
+      alert('Acesso ao microfone falhou. No iOS, certifique-se de não estar em uma chamada e que o Safari tem permissão em Ajustes > Safari > Microfone.');
       return;
     }
 
@@ -157,18 +164,19 @@ const App: React.FC = () => {
 
     try {
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      const ctx = new AudioContextClass({ sampleRate: 24000 });
+      // Usamos a sampleRate do Gemini para evitar re-sampling manual custoso
+      const ctx = new AudioContextClass({ sampleRate: 16000 });
       
-      // 2. WARM-UP (ESSENCIAL PARA IOS): Cria um som silencioso para "acordar" o hardware
+      // 2. WARM-UP SÔNICO (ESSENCIAL PARA SAFARI)
+      // Tocar um silêncio para garantir que o sistema operacional mude para o modo "Media Recording/Playback"
       const oscillator = ctx.createOscillator();
       const gainNode = ctx.createGain();
-      gainNode.gain.value = 0;
+      gainNode.gain.value = 0.001; // Quase inaudível mas existente
       oscillator.connect(gainNode);
       gainNode.connect(ctx.destination);
       oscillator.start(0);
-      oscillator.stop(0.1);
+      oscillator.stop(ctx.currentTime + 0.1);
 
-      // 3. FORCE RESUME: Garante que o contexto não fique em 'suspended'
       if (ctx.state === 'suspended') {
         await ctx.resume();
       }
@@ -185,20 +193,36 @@ const App: React.FC = () => {
         callbacks: {
           onopen: () => {
             const source = ctx.createMediaStreamSource(stream);
+            // ScriptProcessorNode é legado, mas ainda é o mais confiável no Safari Mobile 
+            // se o AudioWorklet falhar no carregamento externo.
             const scriptProcessor = ctx.createScriptProcessor(4096, 1, 1);
+            
             scriptProcessor.onaudioprocess = (e) => {
-              // Só envia se o contexto estiver rodando
+              // Verificação crítica: se o contexto foi suspenso pelo iOS (ex: aba oculta), tentamos retomar
+              if (ctx.state === 'suspended') ctx.resume();
               if (ctx.state !== 'running') return;
               
               const inputData = e.inputBuffer.getChannelData(0);
               const int16 = new Int16Array(inputData.length);
-              for (let i = 0; i < inputData.length; i++) int16[i] = inputData[i] * 32768;
-              sessionPromise.then(s => s.sendRealtimeInput({
-                media: { data: encode(new Uint8Array(int16.buffer)), mimeType: 'audio/pcm;rate=24000' }
-              }));
+              for (let i = 0; i < inputData.length; i++) {
+                // Clipping check
+                const s = Math.max(-1, Math.min(1, inputData[i]));
+                int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+              }
+              
+              sessionPromise.then(s => {
+                s.sendRealtimeInput({
+                  media: { 
+                    data: encode(new Uint8Array(int16.buffer)), 
+                    mimeType: 'audio/pcm;rate=16000' 
+                  }
+                });
+              }).catch(() => {});
             };
+
             source.connect(scriptProcessor);
             scriptProcessor.connect(ctx.destination);
+            
             setIsVoiceActive(true);
             setVoiceConnecting(false);
           },
@@ -206,10 +230,10 @@ const App: React.FC = () => {
             const audioData = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (audioData && audioContextRef.current) {
               const c = audioContextRef.current;
-              // Re-check resume on every message for iOS stability
               if (c.state === 'suspended') await c.resume();
               
               nextStartTimeRef.current = Math.max(nextStartTimeRef.current, c.currentTime);
+              // O Gemini responde em 24000Hz por padrão no modo Live
               const buffer = await decodeAudioData(decode(audioData), c, 24000, 1);
               const source = c.createBufferSource();
               source.buffer = buffer;
@@ -219,6 +243,7 @@ const App: React.FC = () => {
               sourcesRef.current.add(source);
               source.onended = () => sourcesRef.current.delete(source);
             }
+            
             if (msg.toolCall?.functionCalls) {
               for (const fc of msg.toolCall.functionCalls) {
                 if (fc.name === 'scorePoint') {
@@ -240,11 +265,15 @@ const App: React.FC = () => {
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: `Você é o árbitro. Jogadores: ${player1.name} e ${player2.name}. Chame scorePoint ao ouvir quem marcou ponto.`,
+          systemInstruction: `Você é o árbitro de Ping Pong oficial da partida entre ${player1.name} e ${player2.name}. Ouça atentamente e use a função scorePoint quando alguém fizer um ponto. Seja breve e direto nas confirmações de voz.`,
           tools: [{
             functionDeclarations: [{
               name: 'scorePoint',
-              parameters: { type: Type.OBJECT, properties: { playerName: { type: Type.STRING } }, required: ['playerName'] }
+              parameters: { 
+                type: Type.OBJECT, 
+                properties: { playerName: { type: Type.STRING } }, 
+                required: ['playerName'] 
+              }
             }]
           }]
         }
