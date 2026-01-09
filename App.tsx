@@ -143,29 +143,26 @@ const App: React.FC = () => {
 
   const startVoiceAssistant = async () => {
     if (isVoiceActive) return stopVoiceAssistant();
+
+    // 1. ATIVAÇÃO VISUAL IMEDIATA
     setVoiceConnecting(true);
 
-    // 1. CRIAÇÃO IMEDIATA DO CONTEXTO (ORDEM É VITAL NO SAFARI)
+    // 2. INICIALIZAÇÃO SÍNCRONA DO CONTEXTO (CRÍTICO PARA IOS)
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
     const ctx = new AudioContextClass({ sampleRate: 16000 });
     audioContextRef.current = ctx;
 
-    // Tenta ativar o contexto IMEDIATAMENTE antes de qualquer await
+    // "Acorda" o contexto imediatamente
     const resumePromise = ctx.resume();
 
     try {
-      // 2. SOLICITAÇÃO DO MICROFONE
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true
-        } 
-      });
-
+      // 3. PEDIR MICROFONE
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       await resumePromise;
-      if (ctx.state !== 'running') {
-        throw new Error("Contexto de áudio não iniciou. Clique novamente.");
-      }
+
+      // Se chegamos aqui, o microfone foi concedido e o contexto está pronto
+      setIsVoiceActive(true);
+      setVoiceConnecting(false);
 
       const apiKey = process.env.API_KEY;
       if (!apiKey) throw new Error("API Key missing");
@@ -202,10 +199,6 @@ const App: React.FC = () => {
 
             source.connect(scriptProcessor);
             scriptProcessor.connect(ctx.destination);
-            
-            // SOMENTE AQUI ATIVAMOS O ÍCONE VERMELHO
-            setIsVoiceActive(true);
-            setVoiceConnecting(false);
           },
           onmessage: async (msg: LiveServerMessage) => {
             const audioData = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
@@ -259,7 +252,6 @@ const App: React.FC = () => {
       sessionRef.current = await sessionPromise;
     } catch (e) {
       console.error('Session error:', e);
-      setVoiceConnecting(false);
       stopVoiceAssistant();
     }
   };
