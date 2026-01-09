@@ -150,26 +150,21 @@ const App: React.FC = () => {
 
     let stream: MediaStream;
     try {
-      // OBRIGATÓRIO PARA IOS: getUserMedia deve ser a PRIMEIRA chamada do evento
+      // iOS: Captura simples sem forçar sampleRate para evitar erro de hardware
       stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        } 
+        audio: true 
       });
 
       const apiKey = process.env.API_KEY;
       if (!apiKey) throw new Error("API Key missing");
 
-      // Suporte para AudioContext no Safari iOS
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       const inputCtx = new AudioContextClass({ sampleRate: 16000 });
       const outputCtx = new AudioContextClass({ sampleRate: 24000 });
       
-      // Essencial: retomar contextos após gesto do usuário
-      if (inputCtx.state === 'suspended') await inputCtx.resume();
-      if (outputCtx.state === 'suspended') await outputCtx.resume();
+      // Essencial para iOS: Chamar resume() IMEDIATAMENTE após a criação
+      await inputCtx.resume();
+      await outputCtx.resume();
 
       inputAudioContextRef.current = inputCtx;
       outputAudioContextRef.current = outputCtx;
@@ -235,7 +230,7 @@ const App: React.FC = () => {
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: `Você é o árbitro da partida entre ${player1.name} e ${player2.name}. Chame scorePoint ao ouvir ponto marcado.`,
+          systemInstruction: `Você é o árbitro de ping pong. Jogadores: ${player1.name} e ${player2.name}. Chame scorePoint ao detectar ponto.`,
           tools: [{
             functionDeclarations: [{
               name: 'scorePoint',
@@ -246,9 +241,9 @@ const App: React.FC = () => {
       });
       sessionRef.current = await sessionPromise;
     } catch (e: any) {
-      console.error('Final attempt error:', e);
+      console.error('iOS Microphone detailed error:', e);
       setVoiceConnecting(false);
-      alert('Erro de áudio: Verifique se o microfone não está sendo usado por outro app ou se as permissões do Safari estão ativas em Ajustes > Safari.');
+      alert('Acesso ao microfone falhou. No iOS, certifique-se de não estar em uma chamada e que o Safari tem permissão em Ajustes > Safari > Microfone.');
     }
   };
 
