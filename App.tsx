@@ -148,25 +148,28 @@ const App: React.FC = () => {
     if (isVoiceActive) return stopVoiceAssistant();
     setVoiceConnecting(true);
 
+    let stream: MediaStream;
     try {
-      // CRÍTICO PARA iOS: A chamada do microfone DEVE ser a primeira operação assíncrona
-      // para que o navegador entenda que foi disparada por um gesto do usuário.
-      const stream = await navigator.mediaDevices.getUserMedia({ 
+      // OBRIGATÓRIO PARA IOS: getUserMedia deve ser a PRIMEIRA chamada do evento
+      stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
           echoCancellation: true,
-          noiseSuppression: true
+          noiseSuppression: true,
+          autoGainControl: true
         } 
       });
 
       const apiKey = process.env.API_KEY;
       if (!apiKey) throw new Error("API Key missing");
 
+      // Suporte para AudioContext no Safari iOS
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       const inputCtx = new AudioContextClass({ sampleRate: 16000 });
       const outputCtx = new AudioContextClass({ sampleRate: 24000 });
       
-      await inputCtx.resume();
-      await outputCtx.resume();
+      // Essencial: retomar contextos após gesto do usuário
+      if (inputCtx.state === 'suspended') await inputCtx.resume();
+      if (outputCtx.state === 'suspended') await outputCtx.resume();
 
       inputAudioContextRef.current = inputCtx;
       outputAudioContextRef.current = outputCtx;
@@ -232,7 +235,7 @@ const App: React.FC = () => {
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: `Você é o árbitro da partida entre ${player1.name} e ${player2.name}. Quando um ponto for marcado, use a função scorePoint.`,
+          systemInstruction: `Você é o árbitro da partida entre ${player1.name} e ${player2.name}. Chame scorePoint ao ouvir ponto marcado.`,
           tools: [{
             functionDeclarations: [{
               name: 'scorePoint',
@@ -243,11 +246,9 @@ const App: React.FC = () => {
       });
       sessionRef.current = await sessionPromise;
     } catch (e: any) {
-      console.error('Voice access error:', e);
+      console.error('Final attempt error:', e);
       setVoiceConnecting(false);
-      let alertMsg = 'Não foi possível acessar o microfone.';
-      if (e.name === 'NotAllowedError') alertMsg = 'Acesso negado. Por favor, autorize o microfone nas configurações do seu navegador/iOS.';
-      alert(alertMsg);
+      alert('Erro de áudio: Verifique se o microfone não está sendo usado por outro app ou se as permissões do Safari estão ativas em Ajustes > Safari.');
     }
   };
 
