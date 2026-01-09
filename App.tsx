@@ -149,24 +149,22 @@ const App: React.FC = () => {
     setVoiceConnecting(true);
 
     try {
-      // iOS EXIGE que getUserMedia seja chamado diretamente por uma ação do usuário
+      // CRÍTICO PARA iOS: A chamada do microfone DEVE ser a primeira operação assíncrona
+      // para que o navegador entenda que foi disparada por um gesto do usuário.
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
           echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
+          noiseSuppression: true
         } 
       });
 
       const apiKey = process.env.API_KEY;
       if (!apiKey) throw new Error("API Key missing");
 
-      // Suporte para prefixo webkit no iOS
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       const inputCtx = new AudioContextClass({ sampleRate: 16000 });
       const outputCtx = new AudioContextClass({ sampleRate: 24000 });
       
-      // Essencial para iOS: retomar o contexto imediatamente após a criação no evento de clique
       await inputCtx.resume();
       await outputCtx.resume();
 
@@ -234,7 +232,7 @@ const App: React.FC = () => {
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: `Você é o árbitro da partida entre ${player1.name} e ${player2.name}. Chame scorePoint quando alguém marcar ponto. Responda de forma curta.`,
+          systemInstruction: `Você é o árbitro da partida entre ${player1.name} e ${player2.name}. Quando um ponto for marcado, use a função scorePoint.`,
           tools: [{
             functionDeclarations: [{
               name: 'scorePoint',
@@ -245,11 +243,11 @@ const App: React.FC = () => {
       });
       sessionRef.current = await sessionPromise;
     } catch (e: any) {
-      console.error('Microphone access failed:', e);
+      console.error('Voice access error:', e);
       setVoiceConnecting(false);
-      let msg = 'Não foi possível acessar o microfone.';
-      if (e.name === 'NotAllowedError') msg = 'Permissão negada. Vá em Ajustes > Safari > Microfone e permita o acesso.';
-      alert(msg);
+      let alertMsg = 'Não foi possível acessar o microfone.';
+      if (e.name === 'NotAllowedError') alertMsg = 'Acesso negado. Por favor, autorize o microfone nas configurações do seu navegador/iOS.';
+      alert(alertMsg);
     }
   };
 
@@ -287,11 +285,11 @@ const App: React.FC = () => {
               <i className={`fas ${voiceConnecting ? 'fa-spinner fa-spin' : 'fa-microphone'}`}></i>
             </button>
             
-            <button onClick={resetSet} className="bg-slate-800 p-3 w-12 rounded-lg border border-slate-700 text-slate-300">
+            <button onClick={resetSet} className="bg-slate-800 p-3 w-12 rounded-lg border border-slate-700 text-slate-300" title="Zerar Set">
               <i className="fas fa-rotate-left"></i>
             </button>
 
-            <button onClick={resetMatch} className="bg-red-900/20 p-3 w-12 rounded-lg border border-red-900/50 text-red-400">
+            <button onClick={resetMatch} className="bg-red-900/20 p-3 w-12 rounded-lg border border-red-900/50 text-red-400" title="Resetar Partida">
               <i className="fas fa-trash-can"></i>
             </button>
           </div>
