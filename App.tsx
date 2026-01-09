@@ -144,25 +144,33 @@ const App: React.FC = () => {
   const startVoiceAssistant = async () => {
     if (isVoiceActive) return stopVoiceAssistant();
 
-    // 1. ATIVAÇÃO VISUAL IMEDIATA
+    // 1. ATIVAÇÃO VISUAL E INICIALIZAÇÃO SÍNCRONA (CRÍTICO PARA IOS)
     setVoiceConnecting(true);
-
-    // 2. INICIALIZAÇÃO SÍNCRONA DO CONTEXTO (CRÍTICO PARA IOS)
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
     const ctx = new AudioContextClass({ sampleRate: 16000 });
     audioContextRef.current = ctx;
 
-    // "Acorda" o contexto imediatamente
+    // "WARM-UP" SILENCIOSO: O Safari exige que o contexto processe algo imediatamente após o clique
+    const oscillator = ctx.createOscillator();
+    const gainNode = ctx.createGain();
+    gainNode.gain.value = 0.001;
+    oscillator.connect(gainNode);
+    gainNode.connect(ctx.destination);
+    oscillator.start(0);
+    oscillator.stop(ctx.currentTime + 0.1);
+
     const resumePromise = ctx.resume();
 
     try {
-      // 3. PEDIR MICROFONE
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // 2. PEDIR MICROFONE
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        } 
+      });
       await resumePromise;
-
-      // Se chegamos aqui, o microfone foi concedido e o contexto está pronto
-      setIsVoiceActive(true);
-      setVoiceConnecting(false);
 
       const apiKey = process.env.API_KEY;
       if (!apiKey) throw new Error("API Key missing");
@@ -199,6 +207,10 @@ const App: React.FC = () => {
 
             source.connect(scriptProcessor);
             scriptProcessor.connect(ctx.destination);
+            
+            // SÓ MUDA PARA VERMELHO QUANDO TUDO ESTIVER PRONTO
+            setIsVoiceActive(true);
+            setVoiceConnecting(false);
           },
           onmessage: async (msg: LiveServerMessage) => {
             const audioData = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
