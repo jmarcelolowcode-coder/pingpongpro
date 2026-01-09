@@ -149,21 +149,30 @@ const App: React.FC = () => {
     setVoiceConnecting(true);
 
     try {
+      // iOS EXIGE que getUserMedia seja chamado diretamente por uma ação do usuário
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        } 
+      });
+
       const apiKey = process.env.API_KEY;
       if (!apiKey) throw new Error("API Key missing");
 
-      // No iOS, o AudioContext deve ser criado ou resumido dentro do evento de clique
-      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      // Suporte para prefixo webkit no iOS
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      const inputCtx = new AudioContextClass({ sampleRate: 16000 });
+      const outputCtx = new AudioContextClass({ sampleRate: 24000 });
       
-      // Essencial para Safari/iOS: retomar o contexto
+      // Essencial para iOS: retomar o contexto imediatamente após a criação no evento de clique
       await inputCtx.resume();
       await outputCtx.resume();
 
       inputAudioContextRef.current = inputCtx;
       outputAudioContextRef.current = outputCtx;
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const ai = new GoogleGenAI({ apiKey });
 
       const sessionPromise = ai.live.connect({
@@ -191,7 +200,6 @@ const App: React.FC = () => {
             
             if (audio && outputAudioContextRef.current) {
               const ctx = outputAudioContextRef.current;
-              // Garante que o contexto de saída está ativo antes de tocar
               if (ctx.state === 'suspended') await ctx.resume();
               
               nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
@@ -226,7 +234,7 @@ const App: React.FC = () => {
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: `Você é o árbitro de uma partida de ping pong entre ${player1.name} e ${player2.name}. Chame a função scorePoint quando ouvir que um jogador marcou ponto. Confirme o ponto de forma curta e enérgica.`,
+          systemInstruction: `Você é o árbitro da partida entre ${player1.name} e ${player2.name}. Chame scorePoint quando alguém marcar ponto. Responda de forma curta.`,
           tools: [{
             functionDeclarations: [{
               name: 'scorePoint',
@@ -237,12 +245,11 @@ const App: React.FC = () => {
       });
       sessionRef.current = await sessionPromise;
     } catch (e: any) {
-      console.error('Microphone/Voice error:', e);
+      console.error('Microphone access failed:', e);
       setVoiceConnecting(false);
-      let errorMsg = 'Não foi possível acessar o microfone.';
-      if (e.name === 'NotAllowedError') errorMsg = 'Permissão do microfone negada. Verifique as configurações do iOS.';
-      if (e.name === 'NotFoundError') errorMsg = 'Nenhum microfone encontrado.';
-      alert(errorMsg);
+      let msg = 'Não foi possível acessar o microfone.';
+      if (e.name === 'NotAllowedError') msg = 'Permissão negada. Vá em Ajustes > Safari > Microfone e permita o acesso.';
+      alert(msg);
     }
   };
 
@@ -276,24 +283,15 @@ const App: React.FC = () => {
               className={`p-3 w-12 rounded-lg border transition-all flex items-center justify-center ${
                 isVoiceActive ? 'bg-red-500 text-white animate-pulse border-red-400' : 'bg-slate-800 text-slate-300 border-slate-700'
               }`}
-              title={isVoiceActive ? "Desativar Voz" : "Ativar Voz"}
             >
               <i className={`fas ${voiceConnecting ? 'fa-spinner fa-spin' : 'fa-microphone'}`}></i>
             </button>
             
-            <button 
-              onClick={resetSet} 
-              className="bg-slate-800 p-3 w-12 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-700 transition-colors"
-              title="Zerar Set"
-            >
+            <button onClick={resetSet} className="bg-slate-800 p-3 w-12 rounded-lg border border-slate-700 text-slate-300">
               <i className="fas fa-rotate-left"></i>
             </button>
 
-            <button 
-              onClick={resetMatch} 
-              className="bg-red-900/20 p-3 w-12 rounded-lg border border-red-900/50 text-red-400 hover:bg-red-900/40 transition-colors"
-              title="Resetar Partida"
-            >
+            <button onClick={resetMatch} className="bg-red-900/20 p-3 w-12 rounded-lg border border-red-900/50 text-red-400">
               <i className="fas fa-trash-can"></i>
             </button>
           </div>
@@ -308,12 +306,9 @@ const App: React.FC = () => {
       {status === 'finished' && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md">
           <div className="bg-slate-800 p-10 rounded-3xl text-center max-w-sm w-full mx-4 border border-slate-700 shadow-2xl scale-up-center">
-            <div className="text-yellow-500 mb-4">
-              <i className="fas fa-trophy text-6xl"></i>
-            </div>
+            <div className="text-yellow-500 mb-4"><i className="fas fa-trophy text-6xl"></i></div>
             <h2 className="text-4xl font-black text-white mb-2">{winner} Venceu o Set!</h2>
-            <p className="text-slate-400 mb-8">Placar final: {player1.score} - {player2.score}</p>
-            <button onClick={confirmSet} className="w-full bg-green-600 hover:bg-green-500 text-white font-black py-5 rounded-2xl text-2xl shadow-lg shadow-green-900/20 transition-transform active:scale-95">
+            <button onClick={confirmSet} className="w-full bg-green-600 hover:bg-green-500 text-white font-black py-5 rounded-2xl text-2xl mt-4 transition-transform active:scale-95">
               PRÓXIMO SET
             </button>
           </div>
