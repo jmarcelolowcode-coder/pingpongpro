@@ -52,8 +52,7 @@ const App: React.FC = () => {
   const [voiceConnecting, setVoiceConnecting] = useState(false);
   
   const sessionRef = useRef<any>(null);
-  const inputAudioContextRef = useRef<AudioContext | null>(null);
-  const outputAudioContextRef = useRef<AudioContext | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
   const nextStartTimeRef = useRef(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const addPointRef = useRef<(p: 1 | 2) => void>(() => {});
@@ -130,12 +129,10 @@ const App: React.FC = () => {
       sessionRef.current.close();
       sessionRef.current = null;
     }
-    [inputAudioContextRef, outputAudioContextRef].forEach(ref => {
-      if (ref.current) {
-        ref.current.close().catch(() => {});
-        ref.current = null;
-      }
-    });
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => {});
+      audioContextRef.current = null;
+    }
     sourcesRef.current.forEach(s => {
       try { s.stop(); } catch(e) {}
     });
@@ -148,26 +145,18 @@ const App: React.FC = () => {
     if (isVoiceActive) return stopVoiceAssistant();
     setVoiceConnecting(true);
 
-    let stream: MediaStream;
     try {
-      // iOS: Captura simples sem forçar sampleRate para evitar erro de hardware
-      stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: true 
-      });
+      // 1. PRIMEIRA CHAMADA SÍNCRONA: OBRIGATÓRIO PARA SAFARI iOS
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
       const apiKey = process.env.API_KEY;
       if (!apiKey) throw new Error("API Key missing");
 
+      // 2. UNIFICAÇÃO DO CONTEXTO: Usar apenas um contexto para entrada e saída no iOS
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      const inputCtx = new AudioContextClass({ sampleRate: 16000 });
-      const outputCtx = new AudioContextClass({ sampleRate: 24000 });
-      
-      // Essencial para iOS: Chamar resume() IMEDIATAMENTE após a criação
-      await inputCtx.resume();
-      await outputCtx.resume();
-
-      inputAudioContextRef.current = inputCtx;
-      outputAudioContextRef.current = outputCtx;
+      const ctx = new AudioContextClass({ sampleRate: 24000 });
+      await ctx.resume();
+      audioContextRef.current = ctx;
 
       const ai = new GoogleGenAI({ apiKey });
 
@@ -175,41 +164,41 @@ const App: React.FC = () => {
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         callbacks: {
           onopen: () => {
-            const source = inputCtx.createMediaStreamSource(stream);
-            const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
+            const source = ctx.createMediaStreamSource(stream);
+            // ScriptProcessor para compatibilidade máxima com Safari
+            const scriptProcessor = ctx.createScriptProcessor(4096, 1, 1);
             scriptProcessor.onaudioprocess = (e) => {
               const inputData = e.inputBuffer.getChannelData(0);
               const int16 = new Int16Array(inputData.length);
               for (let i = 0; i < inputData.length; i++) int16[i] = inputData[i] * 32768;
               sessionPromise.then(s => s.sendRealtimeInput({
-                media: { data: encode(new Uint8Array(int16.buffer)), mimeType: 'audio/pcm;rate=16000' }
+                media: { data: encode(new Uint8Array(int16.buffer)), mimeType: 'audio/pcm;rate=24000' }
               }));
             };
             source.connect(scriptProcessor);
-            scriptProcessor.connect(inputCtx.destination);
+            scriptProcessor.connect(ctx.destination);
             setIsVoiceActive(true);
             setVoiceConnecting(false);
           },
           onmessage: async (msg: LiveServerMessage) => {
-            const parts = msg.serverContent?.modelTurn?.parts;
-            const audio = parts && parts.length > 0 ? parts[0].inlineData?.data : null;
+            const audioData = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             
-            if (audio && outputAudioContextRef.current) {
-              const ctx = outputAudioContextRef.current;
-              if (ctx.state === 'suspended') await ctx.resume();
+            if (audioData && audioContextRef.current) {
+              const c = audioContextRef.current;
+              if (c.state === 'suspended') await c.resume();
               
-              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
-              const buffer = await decodeAudioData(decode(audio), ctx, 24000, 1);
-              const source = ctx.createBufferSource();
+              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, c.currentTime);
+              const buffer = await decodeAudioData(decode(audioData), c, 24000, 1);
+              const source = c.createBufferSource();
               source.buffer = buffer;
-              source.connect(ctx.destination);
+              source.connect(c.destination);
               source.start(nextStartTimeRef.current);
               nextStartTimeRef.current += buffer.duration;
               sourcesRef.current.add(source);
               source.onended = () => sourcesRef.current.delete(source);
             }
             
-            if (msg.toolCall && msg.toolCall.functionCalls) {
+            if (msg.toolCall?.functionCalls) {
               for (const fc of msg.toolCall.functionCalls) {
                 if (fc.name === 'scorePoint') {
                   const target = (fc.args as any).playerName?.toLowerCase() || "";
@@ -230,7 +219,7 @@ const App: React.FC = () => {
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: `Você é o árbitro de ping pong. Jogadores: ${player1.name} e ${player2.name}. Chame scorePoint ao detectar ponto.`,
+          systemInstruction: `Árbitro de Ping Pong. Jogadores: ${player1.name} e ${player2.name}. Use scorePoint para marcar pontos.`,
           tools: [{
             functionDeclarations: [{
               name: 'scorePoint',
@@ -241,9 +230,9 @@ const App: React.FC = () => {
       });
       sessionRef.current = await sessionPromise;
     } catch (e: any) {
-      console.error('iOS Microphone detailed error:', e);
+      console.error('Critical iOS Error:', e);
       setVoiceConnecting(false);
-      alert('Acesso ao microfone falhou. No iOS, certifique-se de não estar em uma chamada e que o Safari tem permissão em Ajustes > Safari > Microfone.');
+      alert('Erro de acesso: Certifique-se que o Safari tem permissão de Microfone e você não está em outra chamada/vídeo.');
     }
   };
 
