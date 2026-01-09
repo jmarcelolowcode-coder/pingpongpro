@@ -143,45 +143,29 @@ const App: React.FC = () => {
 
   const startVoiceAssistant = async () => {
     if (isVoiceActive) return stopVoiceAssistant();
-    
-    // 1. SOLICITAÇÃO IMEDIATA DO MICROFONE (NECESSÁRIO PARA SAFARI)
-    let stream: MediaStream;
-    try {
-      // Pedindo áudio sem restrições complexas para compatibilidade total
-      stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        } 
-      });
-    } catch (e) {
-      alert('Acesso ao microfone falhou. No iOS, certifique-se de não estar em uma chamada e que o Safari tem permissão em Ajustes > Safari > Microfone.');
-      return;
-    }
-
     setVoiceConnecting(true);
 
-    try {
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      // Usamos a sampleRate do Gemini para evitar re-sampling manual custoso
-      const ctx = new AudioContextClass({ sampleRate: 16000 });
-      
-      // 2. WARM-UP SÔNICO (ESSENCIAL PARA SAFARI)
-      // Tocar um silêncio para garantir que o sistema operacional mude para o modo "Media Recording/Playback"
-      const oscillator = ctx.createOscillator();
-      const gainNode = ctx.createGain();
-      gainNode.gain.value = 0.001; // Quase inaudível mas existente
-      oscillator.connect(gainNode);
-      gainNode.connect(ctx.destination);
-      oscillator.start(0);
-      oscillator.stop(ctx.currentTime + 0.1);
+    // 1. CRIAÇÃO IMEDIATA DO CONTEXTO (ORDEM É VITAL NO SAFARI)
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    const ctx = new AudioContextClass({ sampleRate: 16000 });
+    audioContextRef.current = ctx;
 
-      if (ctx.state === 'suspended') {
-        await ctx.resume();
+    // Tenta ativar o contexto IMEDIATAMENTE antes de qualquer await
+    const resumePromise = ctx.resume();
+
+    try {
+      // 2. SOLICITAÇÃO DO MICROFONE
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true
+        } 
+      });
+
+      await resumePromise;
+      if (ctx.state !== 'running') {
+        throw new Error("Contexto de áudio não iniciou. Clique novamente.");
       }
-      
-      audioContextRef.current = ctx;
 
       const apiKey = process.env.API_KEY;
       if (!apiKey) throw new Error("API Key missing");
@@ -193,19 +177,15 @@ const App: React.FC = () => {
         callbacks: {
           onopen: () => {
             const source = ctx.createMediaStreamSource(stream);
-            // ScriptProcessorNode é legado, mas ainda é o mais confiável no Safari Mobile 
-            // se o AudioWorklet falhar no carregamento externo.
             const scriptProcessor = ctx.createScriptProcessor(4096, 1, 1);
             
             scriptProcessor.onaudioprocess = (e) => {
-              // Verificação crítica: se o contexto foi suspenso pelo iOS (ex: aba oculta), tentamos retomar
               if (ctx.state === 'suspended') ctx.resume();
               if (ctx.state !== 'running') return;
               
               const inputData = e.inputBuffer.getChannelData(0);
               const int16 = new Int16Array(inputData.length);
               for (let i = 0; i < inputData.length; i++) {
-                // Clipping check
                 const s = Math.max(-1, Math.min(1, inputData[i]));
                 int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
               }
@@ -223,6 +203,7 @@ const App: React.FC = () => {
             source.connect(scriptProcessor);
             scriptProcessor.connect(ctx.destination);
             
+            // SOMENTE AQUI ATIVAMOS O ÍCONE VERMELHO
             setIsVoiceActive(true);
             setVoiceConnecting(false);
           },
@@ -231,9 +212,7 @@ const App: React.FC = () => {
             if (audioData && audioContextRef.current) {
               const c = audioContextRef.current;
               if (c.state === 'suspended') await c.resume();
-              
               nextStartTimeRef.current = Math.max(nextStartTimeRef.current, c.currentTime);
-              // O Gemini responde em 24000Hz por padrão no modo Live
               const buffer = await decodeAudioData(decode(audioData), c, 24000, 1);
               const source = c.createBufferSource();
               source.buffer = buffer;
@@ -243,7 +222,6 @@ const App: React.FC = () => {
               sourcesRef.current.add(source);
               source.onended = () => sourcesRef.current.delete(source);
             }
-            
             if (msg.toolCall?.functionCalls) {
               for (const fc of msg.toolCall.functionCalls) {
                 if (fc.name === 'scorePoint') {
@@ -265,7 +243,7 @@ const App: React.FC = () => {
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: `Você é o árbitro de Ping Pong oficial da partida entre ${player1.name} e ${player2.name}. Ouça atentamente e use a função scorePoint quando alguém fizer um ponto. Seja breve e direto nas confirmações de voz.`,
+          systemInstruction: `Você é o árbitro. Jogadores: ${player1.name} e ${player2.name}. Chame scorePoint ao ouvir quem marcou ponto.`,
           tools: [{
             functionDeclarations: [{
               name: 'scorePoint',
