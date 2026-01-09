@@ -144,27 +144,39 @@ const App: React.FC = () => {
   const startVoiceAssistant = async () => {
     if (isVoiceActive) return stopVoiceAssistant();
     
-    // CRÍTICO PARA IOS: getUserMedia DEVE ser a primeira linha após o clique.
-    // Não coloque setStates ou await de outras coisas antes disso.
+    // 1. SOLICITAÇÃO IMEDIATA (SAFARI REQUIREMENT)
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch (e: any) {
-      console.error('Microphone access denied:', e);
-      alert('Não foi possível acessar o microfone. No iPhone, verifique se não há outros apps usando o áudio e se o Safari tem permissão em Ajustes > Safari > Microfone.');
+    } catch (e) {
+      alert('Erro ao acessar microfone no iOS. Verifique as permissões do Safari.');
       return;
     }
 
     setVoiceConnecting(true);
 
     try {
-      const apiKey = process.env.API_KEY;
-      if (!apiKey) throw new Error("API Key missing");
-
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       const ctx = new AudioContextClass({ sampleRate: 24000 });
-      await ctx.resume();
+      
+      // 2. WARM-UP (ESSENCIAL PARA IOS): Cria um som silencioso para "acordar" o hardware
+      const oscillator = ctx.createOscillator();
+      const gainNode = ctx.createGain();
+      gainNode.gain.value = 0;
+      oscillator.connect(gainNode);
+      gainNode.connect(ctx.destination);
+      oscillator.start(0);
+      oscillator.stop(0.1);
+
+      // 3. FORCE RESUME: Garante que o contexto não fique em 'suspended'
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
+      
       audioContextRef.current = ctx;
+
+      const apiKey = process.env.API_KEY;
+      if (!apiKey) throw new Error("API Key missing");
 
       const ai = new GoogleGenAI({ apiKey });
 
@@ -175,6 +187,9 @@ const App: React.FC = () => {
             const source = ctx.createMediaStreamSource(stream);
             const scriptProcessor = ctx.createScriptProcessor(4096, 1, 1);
             scriptProcessor.onaudioprocess = (e) => {
+              // Só envia se o contexto estiver rodando
+              if (ctx.state !== 'running') return;
+              
               const inputData = e.inputBuffer.getChannelData(0);
               const int16 = new Int16Array(inputData.length);
               for (let i = 0; i < inputData.length; i++) int16[i] = inputData[i] * 32768;
@@ -191,7 +206,9 @@ const App: React.FC = () => {
             const audioData = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (audioData && audioContextRef.current) {
               const c = audioContextRef.current;
+              // Re-check resume on every message for iOS stability
               if (c.state === 'suspended') await c.resume();
+              
               nextStartTimeRef.current = Math.max(nextStartTimeRef.current, c.currentTime);
               const buffer = await decodeAudioData(decode(audioData), c, 24000, 1);
               const source = c.createBufferSource();
@@ -223,7 +240,7 @@ const App: React.FC = () => {
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: `Árbitro de Ping Pong. Jogadores: ${player1.name} e ${player2.name}. Marque ponto com scorePoint.`,
+          systemInstruction: `Você é o árbitro. Jogadores: ${player1.name} e ${player2.name}. Chame scorePoint ao ouvir quem marcou ponto.`,
           tools: [{
             functionDeclarations: [{
               name: 'scorePoint',
@@ -233,7 +250,7 @@ const App: React.FC = () => {
         }
       });
       sessionRef.current = await sessionPromise;
-    } catch (e: any) {
+    } catch (e) {
       console.error('Session error:', e);
       setVoiceConnecting(false);
       stopVoiceAssistant();
