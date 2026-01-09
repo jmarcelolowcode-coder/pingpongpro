@@ -144,13 +144,18 @@ const App: React.FC = () => {
   const startVoiceAssistant = async () => {
     if (isVoiceActive) return stopVoiceAssistant();
 
-    // 1. ATIVAÇÃO VISUAL E INICIALIZAÇÃO SÍNCRONA (CRÍTICO PARA IOS)
+    // Informativo para o usuário sobre o microfone ficar ativo
+    const proceed = window.confirm("O microfone ficará ativo continuamente para receber comandos de voz (ex: 'Ponto para Carlos'). Ele só será desligado se você clicar no ícone novamente ou sair do app. Deseja iniciar?");
+    if (!proceed) return;
+
     setVoiceConnecting(true);
+
+    // Inicialização do contexto DEVE ser imediata ao clique no iOS
     const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
     const ctx = new AudioContextClass({ sampleRate: 16000 });
     audioContextRef.current = ctx;
 
-    // "WARM-UP" SILENCIOSO: O Safari exige que o contexto processe algo imediatamente após o clique
+    // "Warm-up" silencioso para enganar a gestão de energia do iOS
     const oscillator = ctx.createOscillator();
     const gainNode = ctx.createGain();
     gainNode.gain.value = 0.001;
@@ -162,7 +167,6 @@ const App: React.FC = () => {
     const resumePromise = ctx.resume();
 
     try {
-      // 2. PEDIR MICROFONE
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
           echoCancellation: true,
@@ -171,6 +175,10 @@ const App: React.FC = () => {
         } 
       });
       await resumePromise;
+
+      // ATIVAÇÃO VISUAL IMEDIATA após a permissão (ÍCONE VERMELHO)
+      setIsVoiceActive(true);
+      setVoiceConnecting(false);
 
       const apiKey = process.env.API_KEY;
       if (!apiKey) throw new Error("API Key missing");
@@ -207,10 +215,6 @@ const App: React.FC = () => {
 
             source.connect(scriptProcessor);
             scriptProcessor.connect(ctx.destination);
-            
-            // SÓ MUDA PARA VERMELHO QUANDO TUDO ESTIVER PRONTO
-            setIsVoiceActive(true);
-            setVoiceConnecting(false);
           },
           onmessage: async (msg: LiveServerMessage) => {
             const audioData = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
@@ -248,7 +252,7 @@ const App: React.FC = () => {
         },
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: `Você é o árbitro. Jogadores: ${player1.name} e ${player2.name}. Chame scorePoint ao ouvir quem marcou ponto.`,
+          systemInstruction: `Você é o árbitro. Jogadores: ${player1.name} e ${player2.name}. Chame scorePoint ao ouvir quem marcou ponto. Use português.`,
           tools: [{
             functionDeclarations: [{
               name: 'scorePoint',
@@ -296,7 +300,7 @@ const App: React.FC = () => {
               onClick={startVoiceAssistant}
               disabled={voiceConnecting}
               className={`p-3 w-12 rounded-lg border transition-all flex items-center justify-center ${
-                isVoiceActive ? 'bg-red-500 text-white animate-pulse border-red-400' : 'bg-slate-800 text-slate-300 border-slate-700'
+                isVoiceActive ? 'bg-red-500 text-white animate-pulse border-red-400 shadow-[0_0_15px_rgba(239,68,68,0.5)]' : 'bg-slate-800 text-slate-300 border-slate-700'
               }`}
             >
               <i className={`fas ${voiceConnecting ? 'fa-spinner fa-spin' : 'fa-microphone'}`}></i>
